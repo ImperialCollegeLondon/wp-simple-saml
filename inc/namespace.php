@@ -220,7 +220,8 @@ function instance() {
 function cross_site_sso() {
 	$redirect_url = get_redirection_url();
 	if ( isset( $_POST['SAMLResponse'] ) && ( get_current_blog_id() !== get_blog_id( $redirect_url ) ) ) { // @codingStandardsIgnoreLine
-		cross_site_sso_redirect( $redirect_url );
+		// workaround for network sites in subfolders
+		// cross_site_sso_redirect( $redirect_url );
 	}
 }
 
