@@ -285,22 +285,42 @@ function action_verify() {
 }
 
 /**
+ * Get metadata of SP
+ *
+ * @return string|\WP_Error
+ */
+function get_metadata() {
+	$settings = instance()->getSettings();
+
+	try {
+		$metadata = $settings->getSPMetadata();
+		$errors   = $settings->validateMetadata( $metadata );
+	} catch ( \Throwable $e ) {
+		$errors = $e->getMessage();
+	} catch ( \Exception $e ) {
+		$errors = $e->getMessage();
+	}
+
+	if ( empty( $errors ) ) {
+		return $metadata;
+	}
+
+	return new \WP_Error(
+		'wpsimplesaml_invalid_settings',
+		esc_html__( 'Invalid SSO settings. Contact your administrator.', 'wp-simple-saml' ),
+		$errors
+	);
+}
+
+/**
  * Output metadata of SP
  *
  * @action wpsimplesaml_action_metadata
  */
 function action_metadata() {
-	$auth     = instance();
-	$settings = $auth->getSettings();
-	$metadata = null;
-	try {
-		$metadata = $settings->getSPMetadata();
-		$errors   = $settings->validateMetadata( $metadata );
-	} catch ( \Exception $e ) {
-		$errors = $e->getMessage();
-	}
+	$metadata = get_metadata();
 
-	if ( $errors ) {
+	if ( is_wp_error( $metadata ) ) {
 		wp_die( esc_html__( 'Invalid SSO settings. Contact your administrator.', 'wp-simple-saml' ) );
 	}
 
@@ -310,12 +330,14 @@ function action_metadata() {
 }
 
 /**
- * Handle authentication responses
- *
- * @return \WP_User|\WP_Error
+ * @return Auth|\WP_Error
  */
-function get_sso_user() {
+function process_response() {
 	$saml = instance();
+
+	if ( ! $saml ) {
+		return new \WP_Error( 'no-saml-instance', esc_html__( 'Unable to get instance of SAML2 Auth object.', 'wp-simple-saml' ) );
+	}
 
 	try {
 		$config = Admin\get_config();
@@ -341,6 +363,9 @@ function get_sso_user() {
 
 		}
 		$saml->processResponse();
+	} catch ( \Throwable $e ) {
+		/* translators: %s = error message */
+		return new \WP_Error( 'invalid-saml', sprintf( esc_html__( 'Error: Could not parse the authentication response, please forward this error to your administrator: "%s"', 'wp-simple-saml' ), esc_html( $e->getMessage() ) ) );
 	} catch ( \Exception $e ) {
 		/* translators: %s = error message */
 		return new \WP_Error( 'invalid-saml', sprintf( esc_html__( 'Error: Could not parse the authentication response, please forward this error to your administrator: "%s"', 'wp-simple-saml' ), esc_html( $e->getMessage() ) ) );
@@ -361,6 +386,21 @@ function get_sso_user() {
 		return new \WP_Error( 'not-authenticated', esc_html__( 'Error: Authentication wasn\'t completed successfully.', 'wp-simple-saml' ) );
 	}
 
+	return $saml;
+}
+
+/**
+ * Handle authentication responses
+ *
+ * @return \WP_User|\WP_Error
+ */
+function get_sso_user() {
+	$saml = process_response();
+
+	if ( is_wp_error( $saml ) ) {
+		return $saml;
+	}
+
 	return get_or_create_wp_user( $saml );
 }
 
@@ -375,12 +415,13 @@ function get_or_create_wp_user( \OneLogin\Saml2\Auth $saml ) {
 
 	$map        = get_attribute_map();
 	$attributes = $saml->getAttributes();
+	$name_id    = $saml->getNameId();
 
 	// Check whether email is the unique identifier set in SAML IDP
 	$is_email_auth = 'emailAddress' === substr( $saml->getNameIdFormat(), - strlen( 'emailAddress' ) );
 
 	if ( $is_email_auth ) {
-		$email = filter_var( $saml->getNameId(), FILTER_VALIDATE_EMAIL );
+		$email = filter_var( $name_id, FILTER_VALIDATE_EMAIL );
 	} else {
 		$email_field = $map['user_email'];
 		$email       = current( (array) $saml->getAttribute( $email_field ) );
@@ -391,10 +432,11 @@ function get_or_create_wp_user( \OneLogin\Saml2\Auth $saml ) {
 	 *
 	 * @param string $email      Email from SAMLResponse
 	 * @param array  $attributes SAML Attributes parsed from SAMLResponse
+	 * @param string $name_id    Name ID from SAMLResponse
 	 *
 	 * @return null|false|\WP_User User object or false if not found
 	 */
-	$user = apply_filters( 'wpsimplesaml_match_user', null, $email, $attributes );
+	$user = apply_filters( 'wpsimplesaml_match_user', null, $email, $attributes, $name_id );
 
 	if ( null === $user ) {
 		$user = get_user_by( 'email', $email );
@@ -408,7 +450,7 @@ function get_or_create_wp_user( \OneLogin\Saml2\Auth $saml ) {
 
 		$user_data = [
 			'ID'            => null,
-			'user_login'    => isset( $map['user_login'], $attributes[ $map['user_login'] ] ) ? $attributes[ $map['user_login'] ][0] : $saml->getNameId(),
+			'user_login'    => isset( $map['user_login'], $attributes[ $map['user_login'] ] ) ? $attributes[ $map['user_login'] ][0] : $name_id,
 			'user_pass'     => wp_generate_password(),
 			'user_nicename' => implode( ' ', array_filter( [ $first_name, $last_name ] ) ),
 			'first_name'    => $first_name,
@@ -539,7 +581,7 @@ function map_user_roles( $user, array $attributes ) {
 			}
 		} elseif ( ! isset( $roles['sites'] ) && isset( $roles['network'] ) ) {
 			$all_site_ids = new \WP_Site_Query( [
-				'network' => get_network()->id,
+				'network' => get_current_network_id(),
 				'fields'  => 'ids',
 				'number'  => 999,
 			] );
@@ -581,7 +623,7 @@ function signon( $user ) {
 function cross_site_sso_redirect( $url ) {
 
 	$host          = wp_parse_url( $url, PHP_URL_HOST );
-	$allowed_hosts = explode( ',', Admin\get_sso_settings( 'sso_whitelisted_hosts' ) );
+	$allowed_hosts = array_map( 'trim', explode( ',', Admin\get_sso_settings( 'sso_whitelisted_hosts' ) ) );
 
 	/**
 	 * Filters the allowed hosts for cross-site SSO redirection
@@ -611,12 +653,10 @@ function cross_site_sso_redirect( $url ) {
 		$sso_url = trailingslashit( $url ) . 'sso/verify';
 	} else {
 		// If we hit a protected page, OR a subsite, log to the main site / root, then redirect to that page/subsite
-		// This doesn't work with protected pages in a sub-directory installs, ie anything outside of wp-admin there
-		// as we cannot detect the site home URL!
-		$sso_url = str_replace( $path, '/sso/verify', $url );
+		$sso_url = get_site_url( get_blog_id( $url ), '/sso/verify' );
 	}
 
-	$sso_url = add_query_arg( 'redirect_to', $url, $sso_url );
+	$sso_url = add_query_arg( 'redirect_to', urlencode( $url ), $sso_url );
 
 	?>
 
@@ -631,15 +671,14 @@ function cross_site_sso_redirect( $url ) {
 		do_action( 'wpsimplesaml_cross_sso_form_inputs' );
 		?>
 	</form>
-	<?php // @codingStandardsIgnoreEnd ?>
-
-	<script>
-		setTimeout( function () {
-			document.getElementById( 'sso_form' ).submit();
-		}, 100 );
-	</script>
-
-	<?php
+	<?php 
+	wp_enqueue_script(
+		'wp-simple-saml-csr',
+		plugins_url( '/assets/csr.js', PLUGIN_FILE ),
+		[],
+		null
+	);
+	print_footer_scripts();
 	exit;
 }
 
@@ -660,7 +699,7 @@ function get_blog_id( $url ) {
 		return 0;
 	}
 
-	$site = get_site_by_path( $fragments['host'], $fragments['path'] );
+	$site = get_site_by_path( $fragments['host'], $fragments['path'] ?? '' );
 
 	$blog_id = 0;
 	if ( $site ) {
