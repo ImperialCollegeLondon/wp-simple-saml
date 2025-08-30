@@ -645,7 +645,7 @@ function cross_site_sso_redirect( $url ) {
 
 	// this function doesn't actually work with subsites so we want to skip it in cases when the host and the main domain are the same
 	// for mapped domains or subdomains, we want it to run
-	if (isset($_SERVER['domain']) && $_SERVER['domain'] === $host) return;
+	if (isset($_SERVER['DOMAIN']) && $_SERVER['DOMAIN'] === $host) return;
 
 	// Workaround for sub-directory installs, as we usually redirect to admin urls
 	$path = wp_parse_url( $url, PHP_URL_PATH );
