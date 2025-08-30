@@ -221,7 +221,7 @@ function cross_site_sso() {
 	$redirect_url = get_redirection_url();
 	if ( isset( $_POST['SAMLResponse'] ) && ( get_current_blog_id() !== get_blog_id( $redirect_url ) ) ) { // @codingStandardsIgnoreLine
 		// workaround for network sites in subfolders
-		// cross_site_sso_redirect( $redirect_url );
+		cross_site_sso_redirect( $redirect_url );
 	}
 }
 
@@ -642,6 +642,8 @@ function cross_site_sso_redirect( $url ) {
 		/* translators: %s is domain of the blacklisted site */
 		wp_die( sprintf( esc_html__( '%s is not a whitelisted cross-network SSO site.', 'wp-simple-saml' ), esc_html( $host ) ) );
 	}
+
+	if (isset($_SERVER['domain']) && $_SERVER['domain'] === $host) return;
 
 	// Workaround for sub-directory installs, as we usually redirect to admin urls
 	$path = wp_parse_url( $url, PHP_URL_PATH );
