@@ -643,6 +643,8 @@ function cross_site_sso_redirect( $url ) {
 		wp_die( sprintf( esc_html__( '%s is not a whitelisted cross-network SSO site.', 'wp-simple-saml' ), esc_html( $host ) ) );
 	}
 
+	// this function doesn't actually work with subsites so we want to skip it in cases when the host and the main domain are the same
+	// for mapped domains or subdomains, we want it to run
 	if (isset($_SERVER['domain']) && $_SERVER['domain'] === $host) return;
 
 	// Workaround for sub-directory installs, as we usually redirect to admin urls
